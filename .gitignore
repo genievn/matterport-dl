@@ -1,0 +1,18 @@
+# Ignore everything
+downloads/
+output/
+defaults.json
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# PyInstaller (matterport-exe.json)
+build/
+dist/
+
+# Editor / OS
+.ruff_cache/
+.DS_Store
