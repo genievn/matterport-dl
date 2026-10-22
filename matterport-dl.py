@@ -328,7 +328,42 @@ async def downloadFile(type, shouldExist, url, file, post_data=None, always_down
 
 
 def validUntilFix(text):
-    return re.sub(r"validUntil\"\s*:\s*\"20[\d]{2}-[\d]{2}-[\d]{2}T", 'validUntil":"2099-01-01T', text)
+    # Matterport signs every asset url with an expiry (normally ~24h). Once it passes the player treats the downloaded urls as stale,
+    # tries to refresh them and the offline tour stalls at start.  Push every expiry far into the future.
+    # handles: "validUntil":"..."  pretty json "validUntil" : "..."  and json escaped inside html  validUntil\\":\\"...
+    text = re.sub(r'(validUntil\\?"\s*:\s*\\?")20\d{2}-\d{2}-\d{2}T', r"\g<1>2099-01-01T", text)
+    # files api: "expires":1792585514 (unix seconds)
+    text = re.sub(r'("expires\\?"\s*:\s*)1\d{9}\b', r"\g<1>4070908800", text)
+    return text
+
+
+def repairExpiringData():
+    """Run from the tour folder before serving: removes the ~24h expiry from data saved by older downloads (idempotent)."""
+    targets = [getModifiedName("index.html"), "index.html"]
+    for root in ("api", "models"):
+        for dirpath, _, filenames in os.walk(root):
+            for name in filenames:
+                full = os.path.join(dirpath, name)
+                if root == "models" and not name.endswith(".json"):
+                    continue
+                if os.path.getsize(full) < 20 * 1024 * 1024:
+                    targets.append(full)
+    fixed = 0
+    for file in targets:
+        if not os.path.isfile(file):
+            continue
+        try:
+            with open(file, "r", encoding="UTF-8") as f:
+                text = f.read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        newText = validUntilFix(text)
+        if newText != text:
+            with open(file, "w", encoding="UTF-8") as f:
+                f.write(newText)
+            fixed += 1
+    if fixed:
+        consoleLog(f"Removed asset url expiry from {fixed} saved file(s) so the tour keeps working offline")
 
 
 async def downloadGraphModels(pageid):
@@ -1416,9 +1451,11 @@ class OurSimpleHTTPRequestHandler(SimpleHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             file_path = f"api/mp/models/graph_{option_name}.json"
+            if os.path.exists(getModifiedName(file_path)):
+                file_path = getModifiedName(file_path)  # the .modified version has the expiry removed (and host replacements)
             if os.path.exists(file_path):
                 with open(file_path, "r", encoding="UTF-8") as f:
-                    self.wfile.write(f.read().encode("utf-8"))
+                    self.wfile.write(validUntilFix(f.read()).encode("utf-8"))
                     post_msg = f"graph of operationName: {option_name} we are handling internally"
             else:
                 logLevel = logging.WARNING
@@ -1530,6 +1567,10 @@ def startServer(baseDir, pageId, browserLaunch, bindAddress, bindPort):
         logging.getLogger().addHandler(logging.StreamHandler())
 
     logging.info(f"Server starting up {sys_info()}")
+    try:
+        repairExpiringData()
+    except Exception as error:
+        logging.exception(f"Unable to remove expiry from saved data: {error}")
     SERVED_BASE_URL = url = f"http://{bindAddress}:{bindPort}"
     print("View in browser: " + url)
     httpd = HTTPServer((bindAddress, bindPort), OurSimpleHTTPRequestHandler)
